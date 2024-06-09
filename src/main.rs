@@ -18,18 +18,32 @@ use ckb_types::{
 
 use std::{error::Error as StdErr, fmt::Error, str::FromStr};
 
-fn init_udt(wallet_address: &str, key: &H256, sudt_amount: u128) -> Result<(), Box<dyn StdErr>> {
+fn init_or_send_udt(
+    issuer_address: &str,
+    sender_info: &(&str, H256),
+    receiver_address: Option<&str>,
+    sudt_amount: u128,
+    apply: bool,
+) -> Result<(), Box<dyn StdErr>> {
     let network_info = NetworkInfo::devnet();
     let configuration = TransactionBuilderConfiguration::new_with_network(network_info.clone())?;
 
-    let issuer = Address::from_str(wallet_address)?;
-    let iterator = InputIterator::new_with_address(&[issuer.clone()], &network_info);
-    let mut builder = SudtTransactionBuilder::new(configuration, iterator, &issuer, true)?;
-    builder.add_output(&issuer, sudt_amount);
+    let issuer = Address::from_str(issuer_address)?;
+    let sender = Address::from_str(sender_info.0)?;
+    let receiver = if let Some(addr) = receiver_address {
+        Address::from_str(addr)?
+    } else {
+        sender.clone()
+    };
+
+    let iterator = InputIterator::new_with_address(&[sender.clone()], &network_info);
+    let owner_mode = receiver_address.is_none();
+    let mut builder = SudtTransactionBuilder::new(configuration, iterator, &issuer, owner_mode)?;
+    builder.add_output(&receiver, sudt_amount);
 
     let mut tx_with_groups = builder.build(&Default::default())?;
 
-    let private_keys = vec![key.clone()];
+    let private_keys = vec![sender_info.1.clone()];
 
     TransactionSigner::new(&network_info).sign_transaction(
         &mut tx_with_groups,
@@ -39,16 +53,17 @@ fn init_udt(wallet_address: &str, key: &H256, sudt_amount: u128) -> Result<(), B
     let json_tx = ckb_jsonrpc_types::TransactionView::from(tx_with_groups.get_tx_view().clone());
     println!("tx: {}", serde_json::to_string_pretty(&json_tx).unwrap());
 
-    // let result = CkbRpcClient::new(network_info.url.as_str())
-    //     .test_tx_pool_accept(json_tx.inner.clone(), None)
-    //     .expect("accept transaction");
-    // println!(">>> check tx result: {:?}  <<<", result);
-
-    let tx_hash = CkbRpcClient::new(network_info.url.as_str())
-        .send_transaction(json_tx.inner, None)
-        .expect("send transaction");
-
-    println!(">>> tx {} sent! <<<", tx_hash);
+    if apply {
+        let tx_hash = CkbRpcClient::new(network_info.url.as_str())
+            .send_transaction(json_tx.inner, None)
+            .expect("send transaction");
+        println!(">>> tx {} sent! <<<", tx_hash);
+    } else {
+        let result = CkbRpcClient::new(network_info.url.as_str())
+            .test_tx_pool_accept(json_tx.inner.clone(), None)
+            .expect("accept transaction");
+        println!(">>> check tx result: {:?}  <<<", result);
+    }
 
     Ok(())
 }
@@ -70,62 +85,6 @@ fn check_account(address: &str, issuer_address: &str) -> Result<(), Box<dyn StdE
         account_ckb_amount / CKB_SHANNONS,
         account_udt_amount
     );
-    Ok(())
-}
-
-fn send(
-    sender_info: &(&str, H256),
-    receiver: &str,
-    amount: u128,
-    issuer_address: Option<&str>,
-) -> Result<(), Box<dyn StdErr>> {
-    let network_info = NetworkInfo::devnet();
-    let configuration = TransactionBuilderConfiguration::new_with_network(network_info.clone())?;
-
-    let issuer = if let Some(address) = issuer_address {
-        Address::from_str(address)?
-    } else {
-        Address::from_str(sender_info.0)?
-    };
-    let sender = Address::from_str(sender_info.0)?;
-    let receiver = Address::from_str(receiver)?;
-    let iterator = InputIterator::new_with_address(&[sender.clone()], &network_info);
-    let mut builder = SudtTransactionBuilder::new(configuration, iterator, &issuer, false)?;
-
-    const CKB_SHANNONS: u64 = 100_000_000;
-    let (account_ckb_amount, account_udt_amount) = builder.check()?;
-    eprintln!(
-        "account: {:?} udt_amount: {}",
-        account_ckb_amount / CKB_SHANNONS,
-        account_udt_amount
-    );
-
-    builder.add_output(&receiver, amount);
-
-    let mut tx_with_groups = builder.build(&Default::default())?;
-
-    let private_keys = vec![sender_info.1.clone()];
-    TransactionSigner::new(&network_info).sign_transaction(
-        &mut tx_with_groups,
-        &SignContexts::new_sighash_h256(private_keys)?,
-    )?;
-
-    let json_tx = ckb_jsonrpc_types::TransactionView::from(tx_with_groups.get_tx_view().clone());
-    eprintln!(
-        "final tx: {}",
-        serde_json::to_string_pretty(&json_tx).unwrap()
-    );
-
-    // let result = CkbRpcClient::new(network_info.url.as_str())
-    //     .test_tx_pool_accept(json_tx.inner.clone(), None)
-    //     .expect("accept transaction");
-    // println!(">>> tx result: {:?}  <<<", result);
-
-    let tx_hash = CkbRpcClient::new(network_info.url.as_str())
-        .send_transaction(json_tx.inner, None)
-        .expect("send transaction");
-    println!(">>> tx {} sent! <<<", tx_hash);
-
     Ok(())
 }
 
@@ -176,20 +135,35 @@ fn init() -> Result<(), Box<dyn StdErr>> {
         ("ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqtrnd9f2lh5vlwlj23dedf7jje65cdj8qs7q4awr", h256!("0xd00c06bfd800d27397002dca6fb0993d5ba6399b4238b2f29ee9deb975ffffff")),
     ];
 
-    init_udt(udt_owner.0, &udt_owner.1, 800000000000).expect("init udt");
+    init_or_send_udt(udt_owner.0, &udt_owner, None, 1000000000000, true).expect("init udt");
     generate_blocks(4).expect("ok");
 
-    send(&udt_owner, wallets[0].0, 200000000000, Some(udt_owner.0))?;
+    init_or_send_udt(
+        udt_owner.0,
+        &udt_owner,
+        Some(wallets[0].0),
+        200000000000,
+        true,
+    )?;
     generate_blocks(4).expect("ok");
 
-    send(&udt_owner, wallets[1].0, 200000000000, Some(udt_owner.0))?;
+    init_or_send_udt(
+        udt_owner.0,
+        &udt_owner,
+        Some(wallets[1].0),
+        200000000000,
+        true,
+    )?;
     generate_blocks(4).expect("ok");
 
-    send(&udt_owner, wallets[2].0, 200000000000, Some(udt_owner.0))?;
+    init_or_send_udt(
+        udt_owner.0,
+        &udt_owner,
+        Some(wallets[2].0),
+        200000000000,
+        true,
+    )?;
     generate_blocks(4).expect("ok");
-
-    // send(&wallets[0], wallets[1].0, 200000000000, Some(udt_owner.0))?;
-    // generate_blocks(4).expect("ok");
 
     check_account(udt_owner.0, udt_owner.0)?;
     check_account(wallets[0].0, udt_owner.0)?;
